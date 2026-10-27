@@ -1,6 +1,7 @@
 mod cli;
 mod media;
 mod process;
+mod quality;
 
 use cli::Cli;
 use serde_json::{json, Value};
@@ -100,7 +101,7 @@ fn discover(log: &File) -> Result<Value> {
         log,
     )?;
     Ok(
-        json!({"schema_version":1,"status":"ok","ffmpeg":ffmpeg,"ffprobe":ffprobe,"encoders":{"libsvtav1":has("libsvtav1"),"libx264":has("libx264")},"vmaf_available":String::from_utf8_lossy(&filters).lines().any(|l| l.split_whitespace().nth(1)==Some("libvmaf")),"quality_verification":"not_implemented"}),
+        json!({"schema_version":1,"status":"ok","ffmpeg":ffmpeg,"ffprobe":ffprobe,"encoders":{"libsvtav1":has("libsvtav1"),"libx264":has("libx264"),"libx265":has("libx265")},"vmaf_available":String::from_utf8_lossy(&filters).lines().any(|l| l.split_whitespace().nth(1)==Some("libvmaf")),"quality_verification":"optional_vmaf"}),
     )
 }
 
@@ -140,7 +141,13 @@ fn output_path(input: &Path, requested: Option<&Path>, ext: &str) -> Result<Path
     Ok(output)
 }
 
-fn encoding_args(c: &Cli, input: &Path, output: &Path, info: &Value) -> Result<Vec<OsString>> {
+fn encoding_args(
+    c: &Cli,
+    input: &Path,
+    output: &Path,
+    info: &Value,
+    selected_crf: Option<u32>,
+) -> Result<Vec<OsString>> {
     let modern = c.profile == "modern";
     let preset = match (modern, c.effort.as_str()) {
         (true, "quick") => "10",
@@ -156,6 +163,18 @@ fn encoding_args(c: &Cli, input: &Path, output: &Path, info: &Value) -> Result<V
         (false, "strict") => "16",
         _ => "20",
     };
+    let crf = if c.profile == "hevc" {
+        if c.quality == "strict" {
+            "20"
+        } else {
+            "24"
+        }
+    } else {
+        crf
+    };
+    let crf = selected_crf
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| crf.to_string());
     let mut a = media::args(&[
         "-hide_banner",
         "-nostdin",
@@ -176,11 +195,15 @@ fn encoding_args(c: &Cli, input: &Path, output: &Path, info: &Value) -> Result<V
         "-c",
         "copy",
         "-c:v:0",
-        if modern { "libsvtav1" } else { "libx264" },
+        match c.profile.as_str() {
+            "modern" => "libsvtav1",
+            "hevc" => "libx265",
+            _ => "libx264",
+        },
         "-preset",
         preset,
         "-crf",
-        crf,
+        &crf,
         "-pix_fmt",
         "yuv420p",
         "-fps_mode:v:0",
@@ -206,13 +229,45 @@ fn encoding_args(c: &Cli, input: &Path, output: &Path, info: &Value) -> Result<V
         });
     }
     if modern {
-        a.extend(media::args(&["-svtav1-params", "lp=4"]));
+        a.extend(media::args(&[
+            "-svtav1-params",
+            &format!("lp={}", c.threads),
+        ]));
     } else {
-        a.extend(media::args(&["-threads", "4", "-movflags", "+faststart"]));
+        if c.profile == "hevc" {
+            a.extend(media::args(&[
+                "-x265-params",
+                &format!("pools={}:frame-threads=1", c.threads),
+                "-tag:v",
+                "hvc1",
+            ]));
+        }
+        a.extend(media::args(&[
+            "-threads",
+            &c.threads.to_string(),
+            "-movflags",
+            "+faststart",
+        ]));
     }
     a.extend(media::args(&["-progress", "pipe:1", "-nostats"]));
     a.push(output.as_os_str().to_owned());
     Ok(a)
+}
+
+#[cfg(unix)]
+fn free_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let stats = unsafe { stats.assume_init() };
+    Some(stats.f_bavail.saturating_mul(stats.f_frsize))
+}
+#[cfg(not(unix))]
+fn free_bytes(_path: &Path) -> Option<u64> {
+    None
 }
 
 fn execute(c: &Cli) -> Result<Value> {
@@ -239,29 +294,65 @@ fn execute(c: &Cli) -> Result<Value> {
     let modern = c.profile == "modern";
     media::check(&info, !modern)?;
     let caps = discover(&log)?;
-    let encoder = if modern { "libsvtav1" } else { "libx264" };
+    let encoder = match c.profile.as_str() {
+        "modern" => "libsvtav1",
+        "hevc" => "libx265",
+        _ => "libx264",
+    };
     if caps["encoders"][encoder] != true {
         return Err(Error::new(3,format!("Your FFmpeg lacks {encoder}; install a build containing it or choose another profile")));
     }
     let ext = if modern { "mkv" } else { "mp4" };
-    let output = output_path(&input, c.output.as_deref(), ext)?;
-    let planned = encoding_args(c, &input, &output, &info)?;
+    let analysis_output = scratch.0.join(format!("unused.{ext}"));
+    let output = if c.analyze {
+        output_path(&input, Some(&analysis_output), ext)?
+    } else {
+        output_path(&input, c.output.as_deref(), ext)?
+    };
+    let planned = encoding_args(c, &input, &output, &info, None)?;
     if c.dry_run {
         return Ok(
-            json!({"schema_version":1,"status":"planned","input":input.to_string_lossy(),"output":output.to_string_lossy(),"profile":c.profile,"quality":c.quality,"quality_verification":"unmeasured_presets","program":"ffmpeg","arguments":planned.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>(),"note":"Actual encoding uses a staging path before publication; no video will be encoded by dry-run."}),
+            json!({"schema_version":1,"status":"planned","input":input.to_string_lossy(),"output":output.to_string_lossy(),"profile":c.profile,"quality":c.quality,"quality_verification":if c.verify {"full_vmaf_requested"} else if c.auto {"sample_vmaf_requested"} else {"unmeasured_presets"},"program":"ffmpeg","arguments":planned.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>(),"note":"Actual encoding uses a staging path before publication; no video will be encoded by dry-run."}),
         );
+    }
+    if (c.auto || c.verify) && caps["vmaf_available"] != true {
+        return Err(Error::new(
+            3,
+            "This feature requires FFmpeg built with libvmaf; run vopt doctor",
+        ));
+    }
+    let analysis = if c.auto {
+        Some(quality::analyze(c, &input, &info, &scratch.0, &log)?)
+    } else {
+        None
+    };
+    if c.analyze {
+        return Ok(analysis.unwrap().report);
+    }
+    let selected_crf = analysis.as_ref().map(|a| a.crf);
+    if let Some(free) = free_bytes(output.parent().unwrap()) {
+        let source_size = fs::metadata(&input).map_err(Error::io)?.len();
+        if free < source_size {
+            eprintln!("Warning: destination has {free} free bytes, less than the source size {source_size}. Space for the candidate is not guaranteed.");
+        }
     }
     let stage = Workspace::new(output.parent().unwrap())?;
     let encoded = stage.0.join(format!("encoded.{ext}"));
-    let a = encoding_args(c, &input, &encoded, &info)?;
+    let a = encoding_args(c, &input, &encoded, &info, selected_crf)?;
     eprintln!(
-        "Encoding {} with {encoder}; quality is preset-based, not measured.",
-        input.display()
+        "Encoding {} with {encoder}; {}.",
+        input.display(),
+        if c.auto {
+            "sample quality measured; full output not yet verified"
+        } else {
+            "quality is preset-based, not measured"
+        }
     );
     let start = Instant::now();
     process::run("ffmpeg", &a, Some(media::duration(&info)?), &log)?;
     eprintln!("Validating streams and decoding output…");
-    let result = media::probe(&encoded, &log).map_err(|e| Error::new(5, e.message))?;
+    let result = media::probe(&encoded, &log)
+        .map_err(|e| Error::new(if e.code == 130 { 130 } else { 5 }, e.message))?;
     let notices = media::validate(&info, &result, !modern)?;
     let mut decode = media::args(&["-hide_banner", "-nostdin", "-v", "error", "-xerror", "-i"]);
     decode.push(encoded.as_os_str().to_owned());
@@ -270,6 +361,20 @@ fn execute(c: &Cli) -> Result<Value> {
     ]));
     process::run("ffmpeg", &decode, None, &log)
         .map_err(|e| Error::new(if e.code == 130 { 130 } else { 5 }, e.message))?;
+    let verification = if c.verify {
+        eprintln!("Measuring full-video VMAF; this may take a while…");
+        let score = quality::compare(
+            &encoded,
+            &input,
+            &scratch.0.join("full-vmaf.json"),
+            c.threads,
+            &log,
+        )?;
+        quality::enforce(&score, &c.content, &c.quality)?;
+        Some(score)
+    } else {
+        None
+    };
     let original_bytes = fs::metadata(&input).map_err(Error::io)?.len();
     let output_bytes = fs::metadata(&encoded).map_err(Error::io)?.len();
     let smaller = output_bytes < original_bytes;
@@ -287,7 +392,68 @@ fn execute(c: &Cli) -> Result<Value> {
             .map_err(|e| Error::new(4, format!("Cannot publish output safely: {e}")))?;
     }
     Ok(
-        json!({"schema_version":1,"status":if smaller {"optimized"} else {"skipped"},"reason":if smaller {"smaller_validated_output"} else {"no_size_reduction"},"input":input.to_string_lossy(),"output":if smaller {Some(output.to_string_lossy())} else {None},"input_bytes":original_bytes,"candidate_bytes":output_bytes,"savings_percent":100.0*(1.0-output_bytes as f64/original_bytes as f64),"elapsed_seconds":start.elapsed().as_secs_f64(),"encoder":encoder,"quality_verification":"unmeasured_presets","validation":{"stream_inventory":true,"decode":true},"notices":notices}),
+        json!({"schema_version":1,"status":if smaller {"optimized"} else {"skipped"},"reason":if smaller {"smaller_validated_output"} else {"no_size_reduction"},"input":input.to_string_lossy(),"output":if smaller {Some(output.to_string_lossy())} else {None},"input_bytes":original_bytes,"candidate_bytes":output_bytes,"savings_percent":100.0*(1.0-output_bytes as f64/original_bytes as f64),"elapsed_seconds":start.elapsed().as_secs_f64(),"encoder":encoder,"quality_verification":if c.verify {"full_vmaf"} else if c.auto {"sample_vmaf"} else {"unmeasured_presets"},"analysis":analysis.map(|a| a.report),"vmaf":verification,"validation":{"stream_inventory":true,"decode":true},"notices":notices}),
+    )
+}
+
+fn batch(c: &Cli) -> Result<Value> {
+    fn collect(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in fs::read_dir(dir)
+            .map_err(|e| Error::new(2, format!("Cannot read {}: {e}", dir.display())))?
+        {
+            let entry = entry.map_err(Error::io)?;
+            let kind = entry.file_type().map_err(Error::io)?;
+            let path = entry.path();
+            if kind.is_dir() && recursive {
+                collect(&path, recursive, out)?;
+            } else if kind.is_file() {
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                if matches!(ext.as_str(), "mp4" | "mkv" | "mov" | "webm" | "avi")
+                    && !stem.ends_with(".optimized")
+                {
+                    out.push(path);
+                }
+            }
+        }
+        Ok(())
+    }
+    let dir = c.input.as_ref().unwrap();
+    if !dir.is_dir() {
+        return Err(Error::new(2, "batch input must be a directory"));
+    }
+    let mut paths = Vec::new();
+    collect(dir, c.recursive, &mut paths)?;
+    paths.sort();
+    if paths.is_empty() {
+        return Err(Error::new(2, "No video files found"));
+    }
+    let mut results = Vec::new();
+    let mut failures = 0;
+    for (index, path) in paths.iter().enumerate() {
+        if process::CANCELLED.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::new(130, "Batch cancelled"));
+        }
+        eprintln!("Batch {}/{}: {}", index + 1, paths.len(), path.display());
+        let mut job = c.clone();
+        job.command = "optimize".into();
+        job.input = Some(path.clone());
+        job.recursive = false;
+        match execute(&job) {
+            Ok(v) => results.push(v),
+            Err(e) if e.code == 130 => return Err(e),
+            Err(e) => {
+                failures += 1;
+                results.push(json!({"status":"error","input":path.to_string_lossy(),"exit_code":e.code,"message":e.message}));
+            }
+        }
+    }
+    Ok(
+        json!({"schema_version":1,"status":if failures == 0 {"batch_complete"} else {"batch_partial"},"files":results,"failed":failures}),
     )
 }
 
@@ -306,7 +472,12 @@ fn main() {
                 println!("vopt {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
-            execute(&c).map(|v| Some((c.json, v)))
+            (if c.command == "batch" {
+                batch(&c)
+            } else {
+                execute(&c)
+            })
+            .map(|v| Some((c.json, v)))
         });
     let code = match result {
         Ok(Some((machine, v))) => {
@@ -320,7 +491,14 @@ fn main() {
             if machine {
                 println!("{}", serde_json::to_string(&v).unwrap());
             } else if v["status"] == "optimized" {
-                println!("Saved {:.1}%: {} → {} bytes\nOutput: {}\nQuality: preset-based; perceptual similarity not measured.",v["savings_percent"].as_f64().unwrap(),v["input_bytes"],v["candidate_bytes"],v["output"].as_str().unwrap_or(""));
+                println!(
+                    "Saved {:.1}%: {} → {} bytes\nOutput: {}\nQuality verification: {}",
+                    v["savings_percent"].as_f64().unwrap(),
+                    v["input_bytes"],
+                    v["candidate_bytes"],
+                    v["output"].as_str().unwrap_or(""),
+                    v["quality_verification"].as_str().unwrap_or("unknown")
+                );
             } else if v["status"] == "skipped" {
                 println!(
                     "No smaller result; original preserved. Candidate: {} bytes, input: {} bytes.",
@@ -331,6 +509,8 @@ fn main() {
             }
             if v["status"] == "skipped" {
                 10
+            } else if v["status"] == "batch_partial" {
+                4
             } else {
                 0
             }
@@ -380,6 +560,7 @@ mod tests {
             Path::new("/tmp/input with spaces.mp4"),
             Path::new("/tmp/out.mkv"),
             &json!({"streams":[]}),
+            None,
         )
         .unwrap();
         assert!(a
