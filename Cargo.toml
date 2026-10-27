@@ -1,0 +1,15 @@
+[package]
+name = "video-optimizer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A safe, local FFmpeg video optimization CLI"
+license = "MIT"
+
+[[bin]]
+name = "vopt"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "=1.0.151"
+libc = "=0.2.190"

@@ -1,6 +1,8 @@
 # Video Optimizer — proposed implementation plan
 
-Status: planning only; product choices below are provisional pending user preferences.
+Status: initial single-file CLI implemented (Phase 1). Product defaults remain provisional. See README.md for the supported scope and known limitations. Phase 2–4 remain planned.
+
+Implementation notes: dependency downloads were unavailable, so the first version uses a small native CLI parser, serde_json, and Unix signal handling through libc. Preset-based quality is explicitly unmeasured. Disk-space preflight and broader fixture coverage remain follow-ups; progress includes approximate speed and ETA.
 
 ## Product goal and limits
 
