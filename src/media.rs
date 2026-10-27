@@ -159,6 +159,14 @@ pub fn validate(before: &Value, after: &Value, mp4: bool) -> Result<Vec<String>>
         if let Some(tags) = a["tags"].as_object() {
             for key in ["language", "title"] {
                 if tags.contains_key(key) && a["tags"][key] != b["tags"][key] {
+                    // Matroska omits the explicit ISO 639-2 "und" tag because
+                    // an absent language tag has the same unspecified meaning.
+                    if key == "language"
+                        && a["tags"][key].as_str() == Some("und")
+                        && b["tags"][key].is_null()
+                    {
+                        continue;
+                    }
                     return Err(fail("Stream language/title changed"));
                 }
             }
