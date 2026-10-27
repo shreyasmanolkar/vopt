@@ -1,8 +1,8 @@
 # Video Optimizer — proposed implementation plan
 
-Status: initial single-file CLI implemented (Phase 1). Product defaults remain provisional. See README.md for the supported scope and known limitations. Phase 2–4 remain planned.
+Status: single-file CLI, sample VMAF search, optional full verification, preview clips, sequential batch, JSON defaults, thread limits, disk warning, and an HEVC profile are implemented. Thresholds are provisional; calibration and broader work remain. See README.md for current scope and limitations.
 
-Implementation notes: dependency downloads were unavailable, so the first version uses a small native CLI parser, serde_json, and Unix signal handling through libc. Preset-based quality is explicitly unmeasured. Disk-space preflight and broader fixture coverage remain follow-ups; progress includes approximate speed and ETA.
+Implementation notes: dependency downloads were unavailable, so the first version uses a small native CLI parser, serde_json, and Unix signal handling through libc. Preset-based quality is explicitly unmeasured. A disk-space warning and approximate progress speed/ETA are available. Realistic quality calibration, stronger disk estimates, and broader fixture coverage remain follow-ups.
 
 ## Product goal and limits
 
