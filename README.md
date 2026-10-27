@@ -1,6 +1,6 @@
-# Video Optimizer (`vopt`)
+# Video Optimizer (`vout`)
 
-A local Rust CLI that uses FFmpeg to create smaller videos while aiming for minimal visible quality loss. Your original is preserved, existing destinations are never overwritten, and larger results are discarded.
+A local Rust CLI that uses FFmpeg to create smaller videos while aiming for minimal visible quality loss. Your original is preserved, existing destinations are never overwritten, and larger results are discarded. The executable is named `vout`.
 
 By default, the CLI uses quality-focused presets. `--auto` selects a setting using sample VMAF comparisons, and `--verify` measures the whole output. These metrics have provisional thresholds and cannot guarantee perceptual quality or text legibility. It does not restore missing detail or promise a particular size reduction. `thorough` means a slower encoder preset; add `--verify` to measure the full output.
 
@@ -10,37 +10,39 @@ Requires Rust 1.85+, FFmpeg, and ffprobe on `PATH`. FFmpeg must include `libsvta
 
 ```bash
 cargo build --release --locked
-./target/release/vopt doctor
-./target/release/vopt video.mp4
+mkdir -p "$HOME/.local/bin"
+install -m755 target/release/vopt "$HOME/.local/bin/vout"
+vout doctor
+vout video.mp4
 ```
 
-Optionally install the executable on your PATH:
+`~/.local/bin` must be on your `PATH`. To confirm:
 
 ```bash
-cargo install --path . --locked
-vopt --help
+command -v vout
+vout --help
 ```
 
 ## Examples
 
 ```bash
-vopt video.mp4                            # AV1 video, copied audio, MKV output
-vopt video.mp4 --profile compatible       # H.264 video, copied audio, MP4 output
-vopt video.mp4 --profile hevc             # H.265 video, copied audio, MP4 output
-vopt video.mp4 --analyze --content screen # Sample settings and estimate size
-vopt video.mp4 --auto --verify            # Choose on samples; verify full output
-vopt video.mp4 --analyze --preview ./clips # Save source/candidate sample pairs
-vopt batch ./recordings --recursive --auto # Process a folder sequentially
-vopt video.mp4 --threads 2 --config defaults.json
-vopt video.mp4 --quality strict           # Less aggressive compression
-vopt video.mp4 --effort thorough          # Slower preset
-vopt video.mp4 --effort quick             # Faster preset
-vopt video.mp4 -o smaller.mkv             # Explicit destination
-vopt video.mp4 --dry-run                  # Print arguments and decisions
-vopt inspect video.mp4                   # Show ffprobe metadata
-vopt doctor --json                       # Check dependency capabilities
-vopt video.mp4 --json                     # One JSON object on stdout
-vopt -- ./-unusual-filename.mp4           # Escape option-like filenames
+vout video.mp4                            # AV1 video, copied audio, MKV output
+vout video.mp4 --profile compatible       # H.264 video, copied audio, MP4 output
+vout video.mp4 --profile hevc             # H.265 video, copied audio, MP4 output
+vout video.mp4 --analyze --content screen # Sample settings and estimate size
+vout video.mp4 --auto --verify            # Choose on samples; verify full output
+vout video.mp4 --analyze --preview ./clips # Save source/candidate sample pairs
+vout batch ./recordings --recursive --auto # Process a folder sequentially
+vout video.mp4 --threads 2 --config defaults.json
+vout video.mp4 --quality strict           # Less aggressive compression
+vout video.mp4 --effort thorough          # Slower preset
+vout video.mp4 --effort quick             # Faster preset
+vout video.mp4 -o smaller.mkv             # Explicit destination
+vout video.mp4 --dry-run                  # Print arguments and decisions
+vout inspect video.mp4                    # Show ffprobe metadata
+vout doctor --json                        # Check dependency capabilities
+vout video.mp4 --json                     # One JSON object on stdout
+vout -- ./-unusual-filename.mp4           # Escape option-like filenames
 ```
 
 Default output: `<input-stem>.optimized.mkv`, or `.mp4` for compatible, next to the resolved input file. Explicit destinations must have the profile's extension and an existing parent directory. A dry run probes input and dependencies but does not encode a video.
@@ -57,7 +59,7 @@ Quality analysis requires `libvmaf`. The program fails clearly if it is missing 
 
 ## Batch jobs and defaults
 
-`vopt batch DIRECTORY` processes supported file extensions sequentially and produces a result for each file. `--recursive` includes subdirectories without following symlinks. Files ending in `.optimized` are skipped, and one failure does not stop the other files. The command exits with code 4 if any file failed. It uses automatic sibling output names; `--output` and `--preview` are not supported for batch jobs. No parallel batch scheduling or resume is available.
+`vout batch DIRECTORY` processes supported file extensions sequentially and produces a result for each file. `--recursive` includes subdirectories without following symlinks. Files ending in `.optimized` are skipped, and one failure does not stop the other files. The command exits with code 4 if any file failed. It uses automatic sibling output names; `--output` and `--preview` are not supported for batch jobs. No parallel batch scheduling or resume is available.
 
 Pass a JSON defaults file explicitly with `--config defaults.json`. CLI options override matching values, regardless of argument order. Allowed keys are `profile`, `effort`, `quality`, `content`, `threads`, `auto`, and `verify`; unknown keys are errors. Boolean settings can be enabled on the CLI, but not disabled there, so omit them from the config when you need an unmeasured run.
 
