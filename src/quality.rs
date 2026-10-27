@@ -214,9 +214,12 @@ pub fn analyze(c: &Cli, input: &Path, info: &Value, work: &Path, log: &File) -> 
         refs.push(reference);
     }
     let candidates: &[u32] = match c.profile.as_str() {
-        "modern" => &[34, 28, 22, 16],
-        "hevc" => &[30, 26, 22, 18],
-        _ => &[26, 22, 18, 14],
+        // Keep testing at finer intervals near the high-quality end. A source
+        // can narrowly miss the target at the old floor while a modestly lower
+        // CRF still produces a useful, smaller result.
+        "modern" => &[34, 28, 22, 16, 14, 12],
+        "hevc" => &[30, 26, 22, 18, 16, 14],
+        _ => &[26, 22, 18, 14, 12, 10],
     };
     let preset = match (c.profile.as_str(), c.effort.as_str()) {
         ("modern", "quick") => "10",
@@ -330,7 +333,8 @@ pub fn analyze(c: &Cli, input: &Path, info: &Value, work: &Path, log: &File) -> 
             });
         }
     }
-    Err(Error::new(5, format!("No sampled setting met the provisional quality targets; no output was published. Trials: {}", serde_json::to_string(&trials).unwrap_or_default())))
+    let (mean, p05) = targets(&c.content, &c.quality);
+    Err(Error::new(5, format!("No sampled setting met the provisional quality targets (content={}, quality={}, mean VMAF >= {mean}, p05 >= {p05}); no output was published. Trials: {}", c.content, c.quality, serde_json::to_string(&trials).unwrap_or_default())))
 }
 
 #[cfg(test)]
