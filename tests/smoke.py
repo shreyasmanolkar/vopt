@@ -67,6 +67,16 @@ class Integration(unittest.TestCase):
         p = self.run_cli(source, '--profile', 'compatible', '-o', out)
         self.assertEqual(p['status'], 'optimized')
 
+    def test_hevc_encoding(self):
+        if not self.run_cli('doctor')['encoders']['libx265']:
+            self.skipTest('FFmpeg lacks libx265')
+        source = self.root / 'hevc-source.mkv'
+        tool('ffmpeg', '-v', 'error', '-i', str(self.source), '-map', '0:v', '-c:v', 'copy', str(source))
+        out = self.root / 'hevc-output.mp4'
+        result = self.run_cli(source, '--profile', 'hevc', '--effort', 'quick', '-o', out)
+        self.assertEqual(result['encoder'], 'libx265')
+        self.assertEqual(self.run_cli('inspect', out)['media']['streams'][0]['codec_name'], 'hevc')
+
     def test_incompatible_audio_rejected(self):
         self.run_cli(self.source, '--profile', 'compatible', code=2)
 
@@ -132,6 +142,41 @@ class Integration(unittest.TestCase):
         info = self.run_cli('inspect', out)['media']
         self.assertEqual(len(info['streams']), 3)
         self.assertEqual(info['chapters'][0]['tags']['title'], 'Intro')
+
+    def test_batch_and_config(self):
+        directory = self.root / 'batch'
+        directory.mkdir()
+        source = directory / 'one.mkv'
+        tool('ffmpeg', '-v', 'error', '-i', str(self.source), '-map', '0:v', '-c:v', 'copy', str(source))
+        (directory / 'bad.mp4').write_bytes(b'broken')
+        config = self.root / 'config.json'
+        config.write_text(json.dumps({'profile':'modern','effort':'quick','threads':2}))
+        p = self.run_cli('batch', directory, '--config', config, '--profile', 'compatible', code=4)
+        self.assertEqual(p['status'], 'batch_partial')
+        self.assertEqual(p['failed'], 1)
+        self.assertTrue((directory / 'one.optimized.mp4').is_file())
+        self.assertEqual((directory / 'bad.mp4').read_bytes(), b'broken')
+
+    def test_quality_search_preview_and_full_verify(self):
+        caps = self.run_cli('doctor')
+        if not caps['vmaf_available']:
+            self.skipTest('FFmpeg lacks libvmaf')
+        source = self.root / 'quality-source.mkv'
+        tool('ffmpeg', '-v', 'error', '-i', str(self.source), '-map', '0:v', '-c:v', 'copy', str(source))
+        preview = self.root / 'preview'
+        preview.mkdir()
+        p = self.run_cli(source, '--profile', 'compatible', '--effort', 'quick', '--analyze', '--preview', preview)
+        self.assertEqual(p['quality_verification'], 'sample_vmaf')
+        self.assertTrue((preview / 'sample-0-source.mkv').is_file())
+        self.assertTrue((preview / 'sample-0-encoded.mkv').is_file())
+        before = (preview / 'sample-0-source.mkv').read_bytes()
+        self.run_cli(source, '--profile', 'compatible', '--effort', 'quick', '--analyze', '--preview', preview, code=4)
+        self.assertEqual((preview / 'sample-0-source.mkv').read_bytes(), before)
+        out = self.root / 'quality.mp4'
+        p = self.run_cli(source, '--profile', 'compatible', '--effort', 'quick', '--auto', '--verify', '-o', out)
+        self.assertEqual(p['quality_verification'], 'full_vmaf')
+        self.assertEqual(p['vmaf']['frames'], 48)
+        self.assertTrue(out.is_file())
 
     def test_cancellation(self):
         out = self.root / 'cancelled.mkv'
