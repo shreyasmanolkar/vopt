@@ -1,0 +1,32 @@
+name: Build executable artifacts
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact: vopt-linux-x86_64
+            binary: target/release/vopt
+          - os: macos-14
+            artifact: vopt-macos-arm64
+            binary: target/release/vopt
+          - os: windows-2022
+            artifact: vopt-windows-x86_64
+            binary: target/release/vopt.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
